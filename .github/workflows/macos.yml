@@ -10,9 +10,11 @@ on:
 
 jobs:
   build:
-    runs-on: macos-14
+    runs-on: macos-latest
     steps:
       - uses: actions/checkout@v4
+      - name: Toolchain
+        run: xcodebuild -version && swift --version
       - name: Build app
         run: bash macos/build-app.sh
       - uses: actions/upload-artifact@v4
