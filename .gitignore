@@ -5,3 +5,5 @@ publish/
 *.user
 .dotnet-home/
 .nuget-packages/
+macos/.build/
+macos/build/

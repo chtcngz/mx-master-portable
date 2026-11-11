@@ -1,0 +1,22 @@
+name: macOS build
+
+on:
+  push:
+    branches: [main, macos-app]
+    paths:
+      - "macos/**"
+      - ".github/workflows/macos.yml"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build app
+        run: bash macos/build-app.sh
+      - uses: actions/upload-artifact@v4
+        with:
+          name: MXMasterPortable-macOS
+          path: macos/build/MXMasterPortable-macOS.zip
+          if-no-files-found: error
