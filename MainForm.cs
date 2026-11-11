@@ -61,6 +61,9 @@ internal sealed class MainForm : Form
         Font = new Font("Consolas", 9), BackColor = Color.FromArgb(247, 249, 251)
     };
     private readonly Label _state = new() { AutoSize = true, Text = "Hazır" };
+    private TableLayoutPanel _layout = null!;
+    private const int GridRow = 4;
+    private const int MinLogHeight = 110;
 
     public MainForm()
     {
@@ -124,7 +127,7 @@ internal sealed class MainForm : Form
             if (_buttons.IsCurrentCellDirty) _buttons.CommitEdit(DataGridViewDataErrorContexts.Commit);
         };
 
-        var layout = new TableLayoutPanel
+        var layout = _layout = new TableLayoutPanel
         {
             Dock = DockStyle.Fill, Padding = new Padding(18), ColumnCount = 1, RowCount = 10,
             BackColor = Canvas
@@ -133,11 +136,12 @@ internal sealed class MainForm : Form
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 30));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 69));
+        // Grid height is set from the row count in FitGridToRows.
+        layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 300));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 36));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 32));
-        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 31));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 28));
         layout.Controls.Add(top, 0, 0);
         layout.Controls.Add(buttonsLine, 0, 1);
@@ -388,6 +392,23 @@ internal sealed class MainForm : Form
             int rowId = _buttons.Rows.Add("Windows · genel", fallback.Item2, _profile.Get(fallback.Item1));
             _buttons.Rows[rowId].Tag = fallback.Item1;
         }
+        FitGridToRows();
+    }
+
+    // Show every assignment row without scrolling; the log takes what is left.
+    private void FitGridToRows()
+    {
+        int gridHeight = _buttons.ColumnHeadersHeight +
+            _buttons.Rows.GetRowsHeight(DataGridViewElementStates.Visible) + 12;
+        _layout.RowStyles[GridRow].Height = gridHeight;
+        int fixedHeight = _layout.Padding.Vertical + MinLogHeight;
+        foreach (RowStyle style in _layout.RowStyles)
+            if (style.SizeType == SizeType.Absolute) fixedHeight += (int)style.Height;
+        int missing = fixedHeight - ClientSize.Height;
+        if (missing <= 0 || WindowState != FormWindowState.Normal) return;
+        var area = Screen.FromControl(this).WorkingArea;
+        Height = Math.Min(Height + missing, area.Height);
+        if (Bottom > area.Bottom) Top = Math.Max(area.Top, area.Bottom - Height);
     }
 
     private void SaveScreenSettings()
