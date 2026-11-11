@@ -92,6 +92,12 @@ internal static class HidNative
     [DllImport("hid.dll", SetLastError = true)]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool HidD_GetProductString(SafeFileHandle hidDevice, IntPtr buffer, int bufferLength);
+    [DllImport("hid.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool HidD_SetOutputReport(SafeFileHandle hidDevice, byte[] report, int reportLength);
+
+    public static bool SendOutputReport(SafeFileHandle handle, byte[] report) =>
+        HidD_SetOutputReport(handle, report, report.Length);
 
     public static SafeFileHandle OpenReadWrite(string path)
     {
@@ -139,6 +145,9 @@ internal static class HidNative
                 if (descriptorHandle.IsInvalid) continue;
                 var attrs = new HiddAttributes { Size = Marshal.SizeOf<HiddAttributes>() };
                 if (!HidD_GetAttributes(descriptorHandle, ref attrs) || attrs.VendorID != 0x046D) continue;
+                // C53F is a Lightspeed gaming receiver, not a Bolt receiver for
+                // the MX Master models supported by this application.
+                if (attrs.ProductID == 0xC53F) continue;
                 if (!HidD_GetPreparsedData(descriptorHandle, out IntPtr parsed)) continue;
                 HidpCaps caps;
                 try

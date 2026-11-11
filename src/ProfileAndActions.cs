@@ -104,7 +104,7 @@ internal static class ShortcutActions
 {
     public static readonly ActionOption[] All =
     [
-        new("native", "Varsayılan / değiştirme"),
+        new("native", "Varsayılan (fare işlevi)"),
         new("copy", "Kopyala · Ctrl+C"),
         new("paste", "Yapıştır · Ctrl+V"),
         new("cut", "Kes · Ctrl+X"),

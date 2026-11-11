@@ -13,6 +13,8 @@ internal sealed record MouseControl(ushort Cid, ushort TaskId, byte Flags, bool 
     public string Key => $"CID:{Cid:X4}";
     public string Description => Cid switch
     {
+        0x0050 => "Sol tık",
+        0x0051 => "Sağ tık",
         0x0052 => "Orta tuş",
         0x0053 => "Geri",
         0x0056 => "İleri",
@@ -44,6 +46,9 @@ internal sealed class HidppConnection : IAsyncDisposable
 
     public event Action<byte[]>? Notification;
     public HidInterface Interface => _device;
+    public string? LastError { get; private set; }
+    public bool IsBroken => _broken;
+    private volatile bool _broken;
 
     public HidppConnection(HidInterface device)
     {
@@ -67,7 +72,11 @@ internal sealed class HidppConnection : IAsyncDisposable
                 bool handled = false;
                 lock (_gate)
                 {
-                    if (_pending is not null && frame[1] == _target)
+                    // Bluetooth HID++ requests use 0xFF, but some devices reply
+                    // with 0x00 as the device index.
+                    bool deviceMatches = frame[1] == _target ||
+                        (_device.TransportName == "Bluetooth" && _target == 0xFF && frame[1] == 0x00);
+                    if (_pending is not null && deviceMatches)
                     {
                         bool match = frame[2] == _feature && frame[3] == _functionAndSoftware;
                         bool error = (frame[2] == 0xFF || frame[2] == 0x8F) &&
@@ -101,6 +110,8 @@ internal sealed class HidppConnection : IAsyncDisposable
         try
         {
             if (_closed) throw new ObjectDisposedException(nameof(HidppConnection));
+            if (_broken) throw new IOException(LastError ?? "HID++ bağlantısı kullanılamıyor");
+            LastError = null;
             byte sw = (byte)((Interlocked.Increment(ref _counter) % 15) + 1);
             byte combined = (byte)((function << 4) | sw);
             var outgoing = new byte[_device.OutputLength];
@@ -119,10 +130,39 @@ internal sealed class HidppConnection : IAsyncDisposable
             }
             try
             {
-                await _stream.WriteAsync(outgoing, _cts.Token).ConfigureAwait(false);
+                try
+                {
+                    if (_device.TransportName == "Bluetooth")
+                    {
+                        // BLE HID WriteFile can stall; send an acknowledged
+                        // output report through the HID control path first.
+                        bool sent = await Task.Run(() => HidNative.SendOutputReport(_stream.SafeFileHandle, outgoing))
+                            .WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                        if (!sent)
+                            await _stream.WriteAsync(outgoing, _cts.Token).AsTask()
+                                .WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                    }
+                    else
+                    {
+                        await _stream.WriteAsync(outgoing, _cts.Token).AsTask()
+                            .WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+                    }
+                }
+                catch (TimeoutException)
+                {
+                    // A stalled HID write must not hold the scan indefinitely.
+                    _broken = true;
+                    _cts.Cancel();
+                    _stream.Dispose();
+                    LastError = $"HID++ yazma zaman aşımı (slot {deviceIndex:X2}, feature {featureIndex:X2})";
+                    throw new TimeoutException(LastError);
+                }
                 var completed = await Task.WhenAny(waiter.Task, Task.Delay(700, _cts.Token)).ConfigureAwait(false);
                 if (completed != waiter.Task)
-                    throw new TimeoutException($"HID++ yanıt zaman aşımı (slot {deviceIndex:X2}, feature {featureIndex:X2})");
+                {
+                    LastError = $"HID++ yanıt zaman aşımı (slot {deviceIndex:X2}, feature {featureIndex:X2})";
+                    throw new TimeoutException(LastError);
+                }
                 byte[] result = await waiter.Task.ConfigureAwait(false);
                 if (result[2] == 0xFF || result[2] == 0x8F)
                     throw new InvalidOperationException($"HID++ protokol hatası 0x{result[5]:X2}");
@@ -226,7 +266,7 @@ internal sealed class MxMasterSession : IAsyncDisposable
             if (nameIndex != 0)
             {
                 byte[] len = await link.CallAsync(slot, nameIndex, 0);
-                int count = Math.Clamp(len[4], 0, 64);
+                int count = Math.Clamp((int)len[4], 0, 64);
                 var sb = new StringBuilder();
                 for (int offset = 0; offset < count; offset += 16)
                 {
@@ -266,7 +306,10 @@ internal sealed class MxMasterSession : IAsyncDisposable
 
     private void OnNotification(byte[] packet)
     {
-        if (packet.Length < 12 || packet[1] != Slot || packet[2] != ControlsFeature ||
+        if (packet.Length < 12) return;
+        bool deviceMatches = packet[1] == Slot ||
+            (Interface.TransportName == "Bluetooth" && Slot == 0xFF && packet[1] == 0x00);
+        if (!deviceMatches || packet[2] != ControlsFeature ||
             ControlsFeature == 0 || packet[3] != 0) return;
         var current = new HashSet<ushort>();
         for (int i = 4; i + 1 < Math.Min(packet.Length, 12); i += 2)
