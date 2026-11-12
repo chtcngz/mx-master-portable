@@ -24,11 +24,13 @@ Model tanımada kendi cihazını gerçekten yanıtlayan bir fiziksel mouse doğr
 - Modelin gerçek kontrol tablosunu `0x1B04` ile okur; `divert + reprog` bildirilen kontrolleri yapılandırılabilir gösterir.
 - Desteklenen fiziksel tuşu geçici olarak yazılıma yönlendirir, tuşa basıldığında ön tanımlı Windows kısayolunu yollar; durdurulunca eski geçici yönlendirme durumunu geri yükler.
 - **Fiziksel mouse bazlı ayrı profiller:** Bluetooth veya Bolt üzerinden aynı `unit_id` algılanırsa aynı tuş ataması kullanılır. İki ayrı fiziksel mouse birbirinin ayarlarını değiştirmez.
+- **Başparmak tekerleği (0x2150):** yatay kaydırma (normal veya ters yön), sanal masaüstü değiştirme, sekme değiştirme, ses seviyesi veya yakınlaştırma atanabilir.
+- **Özel kısayol:** listedeki *Özel kısayol kaydet…* ile istenen tuş kombinasyonuna basılarak kaydedilir (Win+Tab gibi sistem kısayolları kayıt sırasında çalışmaz). Yakalanamayan kombinasyonlar Ctrl/Shift/Alt/Win kutuları ve tuş listesiyle elle seçilebilir.
 - İsteğe bağlı, **bütün fareleri etkileyen** Windows geri/ileri/orta tuş fallback'i mevcuttur. Seçeneği açmadan kullanılmaz.
 - Tek kullanıcı klasöründe `recovery.json` (önce kaydedilen HID++ reporting durumları) ve `profiles/<sha256-id>.json` (her cihazın profili) tutulur.
 - v0.1'in `profile.json` dosyası **yalnızca MX Master 4 için** geriye dönük okunabilir. Eski `recovery.json` içindeki ham unit ID de MX Master 4 için tanınır.
 
-**Bu sürümde YOK:** DPI ayarı, SmartShift hassasiyet ayarı, yatay teker özelleştirme, gesture swipe algılama ve MX Master 4'ün haptic ayarı. 3S'de Haptic Sense paneli bulunmaz. Bu özellikler ayrı aşama.
+**Bu sürümde YOK:** DPI ayarı, SmartShift hassasiyet ayarı, gesture swipe algılama ve MX Master 4'ün haptic ayarı. 3S'de Haptic Sense paneli bulunmaz. Bu özellikler ayrı aşama.
 
 ## Derleme (SDK olan herhangi bir Windows 10/11 x64 bilgisayarda)
 
@@ -37,7 +39,7 @@ Model tanımada kendi cihazını gerçekten yanıtlayan bir fiziksel mouse doğr
 3. `publish\MXMasterPortable.exe` oluşacaktır. Bu EXE kendi .NET çalışma zamanını taşır (*self-contained*), yönetici yetkisi veya .NET runtime kurulumu gerektirmeden açılacak şekilde tasarlanır.
 4. İzin verilen yöntemle EXE'yi kurumsal bilgisayara aktarın ve normal kullanıcı hesabıyla başlatın.
 5. **Cihazları tara** → 3S veya 4 cihazını seç → `HID++` ile etiketlenmiş tuşu yapılandır → **Atamaları uygula**.
-6. **Durdur / geri al** düğmesi fiziksel mouse'un eski yönlendirme durumunu geri yükler.
+6. **Atamaları durdur** düğmesi fiziksel mouse'un eski yönlendirme durumunu geri yükler; seçimler profilde kalır. **Varsayılana sıfırla** bütün atamaları temizler.
 
 Doğrudan komut:
 
@@ -59,7 +61,7 @@ Bu testler yalnızca HID++ yanıtı çözümlemeyi test eder; Windows HID bağla
 2. Uygulamayı açıp **Cihazları tara**. Günlükte doğru model, transport, slot, model PID'leri, `0x1B04` index ve listelenen kontrol sayısını kontrol et.
 3. **Windows genel tuşları yakala** kutusunu şimdilik boş bırak.
 4. Listelenen ve değiştirilebilir bir fiziksel tuşa `F13` atayarak deneyebilirsin. F13 birçok programda görünür bir eyleme sahip olmadığı için testten sonra kendi kısayolunu seç.
-5. **Durdur / geri al** ile değişikliğin kapandığını kontrol et.
+5. **Atamaları durdur** ile değişikliğin kapandığını kontrol et.
 6. İki farklı mouse'u aynı Bolt alıcısına bağlıyorsan, her birini sırayla seçip profilin birbirine karışmadığını dene.
 
 ## Uyarılar ve sınırlar

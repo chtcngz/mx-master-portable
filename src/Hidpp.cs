@@ -239,6 +239,11 @@ internal sealed class MxMasterSession : IAsyncDisposable
     public byte ControlsFeature { get; }
     public IReadOnlyList<MouseControl> Controls { get; }
     public event Action<ushort>? ButtonPressed;
+    // 0x2150 THUMBWHEEL: index 0 when the mouse has no thumb wheel.
+    public byte ThumbwheelFeature { get; private set; }
+    public int ThumbwheelDivertedResolution { get; private set; }
+    /// <summary>Signed rotation delta and rotation status (1 start, 2 active, 3 stop).</summary>
+    public event Action<short, byte>? ThumbRotated;
     private HashSet<ushort> _pressed = new();
 
     private MxMasterSession(HidppConnection link, byte slot, string name,
@@ -300,7 +305,12 @@ internal sealed class MxMasterSession : IAsyncDisposable
         catch { /* Friendly name is optional, x0003 PID confirmed the model */ }
         byte controlsIndex;
         try { controlsIndex = await link.FeatureIndexAsync(slot, 0x1B04); }
-        catch { return new MxMasterSession(link, slot, name, model, identity, pids, 0, []); }
+        catch
+        {
+            var bare = new MxMasterSession(link, slot, name, model, identity, pids, 0, []);
+            await bare.ProbeThumbwheelAsync();
+            return bare;
+        }
         var controls = new List<MouseControl>();
         if (controlsIndex != 0)
         {
@@ -320,7 +330,40 @@ internal sealed class MxMasterSession : IAsyncDisposable
             }
             catch { /* Partial enumeration is still useful for diagnostic view */ }
         }
-        return new MxMasterSession(link, slot, name, model, identity, pids, controlsIndex, controls);
+        var session = new MxMasterSession(link, slot, name, model, identity, pids, controlsIndex, controls);
+        await session.ProbeThumbwheelAsync();
+        return session;
+    }
+
+    // Read-only discovery of 0x2150; a missing thumb wheel is not an error.
+    private async Task ProbeThumbwheelAsync()
+    {
+        try
+        {
+            byte index = await _link.FeatureIndexAsync(Slot, 0x2150);
+            if (index == 0) return;
+            byte[] info = await _link.CallAsync(Slot, index, 0);
+            ThumbwheelDivertedResolution = (info[6] << 8) | info[7];
+            ThumbwheelFeature = index;
+        }
+        catch { ThumbwheelFeature = 0; }
+    }
+
+    public async Task<(bool Diverted, bool Inverted)> GetThumbwheelStatusAsync()
+    {
+        if (ThumbwheelFeature == 0) throw new NotSupportedException("0x2150 mevcut değil");
+        var bytes = await _link.CallAsync(Slot, ThumbwheelFeature, 1);
+        return (bytes[4] != 0, bytes[5] != 0);
+    }
+
+    public async Task SetThumbwheelReportingAsync(bool divert, bool invert)
+    {
+        if (ThumbwheelFeature == 0) throw new NotSupportedException("0x2150 mevcut değil");
+        // Temporary like 0x1B04 diversion: the mouse resets it on power cycle.
+        await _link.CallAsync(Slot, ThumbwheelFeature, 2, divert ? (byte)1 : (byte)0, invert ? (byte)1 : (byte)0);
+        var verify = await GetThumbwheelStatusAsync();
+        if (verify.Diverted != divert || verify.Inverted != invert)
+            throw new IOException("Başparmak tekerleği ayarı doğrulanamadı");
     }
 
     private void OnNotification(byte[] packet)
@@ -328,6 +371,12 @@ internal sealed class MxMasterSession : IAsyncDisposable
         if (packet.Length < 12) return;
         bool deviceMatches = packet[1] == Slot ||
             (Interface.TransportName == "Bluetooth" && Slot == 0xFF && packet[1] == 0x00);
+        if (deviceMatches && ThumbwheelFeature != 0 && packet[2] == ThumbwheelFeature && packet[3] == 0)
+        {
+            short rotation = (short)((packet[4] << 8) | packet[5]);
+            ThumbRotated?.Invoke(rotation, packet[8]);
+            return;
+        }
         if (!deviceMatches || packet[2] != ControlsFeature ||
             ControlsFeature == 0 || packet[3] != 0) return;
         var current = new HashSet<ushort>();

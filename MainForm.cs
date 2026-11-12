@@ -138,6 +138,9 @@ internal sealed class MainForm : Form
             FlatStyle = FlatStyle.Flat, DisplayStyle = DataGridViewComboBoxDisplayStyle.ComboBox
         });
         _buttons.DataError += (_, e) => e.ThrowException = false;
+        _buttons.CellBeginEdit += (_, e) =>
+            _editPrevious = e.ColumnIndex == 2 ? _buttons.Rows[e.RowIndex].Cells[2].Value as string : null;
+        _buttons.CellValueChanged += (_, e) => OnActionCellChanged(e);
         _buttons.CurrentCellDirtyStateChanged += (_, _) =>
         {
             if (_buttons.IsCurrentCellDirty) _buttons.CommitEdit(DataGridViewDataErrorContexts.Commit);
@@ -423,6 +426,15 @@ internal sealed class MainForm : Form
                 }
             }
         }
+        if (_current is { ThumbwheelFeature: not 0 })
+        {
+            int rowId = _buttons.Rows.Add($"HID++ 0x2150", "Başparmak tekerleği (yatay)", null);
+            var row = _buttons.Rows[rowId];
+            row.Tag = ThumbActions.Key;
+            string value = _profile.Get(ThumbActions.Key);
+            row.Cells[2] = NewActionCell(ThumbActions.All);
+            row.Cells[2].Value = ThumbActions.All.Any(a => a.Id == value) ? value : "native";
+        }
         foreach (var fallback in new[]
         {
             ("SYS:BACK", "Windows XButton1 / Geri"),
@@ -430,10 +442,55 @@ internal sealed class MainForm : Form
             ("SYS:MIDDLE", "Windows Orta tuş")
         })
         {
-            int rowId = _buttons.Rows.Add("Windows · genel", fallback.Item2, _profile.Get(fallback.Item1));
+            int rowId = _buttons.Rows.Add("Windows · genel", fallback.Item2, null);
             _buttons.Rows[rowId].Tag = fallback.Item1;
         }
+        // Shortcut rows get their own option list so a recorded custom
+        // shortcut ("keys:…") is a valid, displayable value of that cell.
+        foreach (DataGridViewRow row in _buttons.Rows)
+        {
+            if (row.Tag is not string id || id == ThumbActions.Key || row.Cells[2].ReadOnly) continue;
+            SetShortcutCell(row, _profile.Get(id));
+        }
         FitGridToRows();
+    }
+
+    private static DataGridViewComboBoxCell NewActionCell(IEnumerable<ActionOption> options) => new()
+    {
+        DataSource = options.ToList(),
+        ValueMember = nameof(ActionOption.Id),
+        DisplayMember = nameof(ActionOption.Title),
+        FlatStyle = FlatStyle.Flat,
+        DisplayStyle = DataGridViewComboBoxDisplayStyle.ComboBox
+    };
+
+    private static void SetShortcutCell(DataGridViewRow row, string value)
+    {
+        if (value != "native" && !ShortcutActions.TryParseCustom(value, out _) &&
+            ShortcutActions.All.All(a => a.Id != value)) value = "native";
+        row.Cells[2] = NewActionCell(ShortcutActions.OptionsFor(value));
+        row.Cells[2].Value = value;
+    }
+
+    private string? _editPrevious;
+
+    private void OnActionCellChanged(DataGridViewCellEventArgs e)
+    {
+        if (e.RowIndex < 0 || e.ColumnIndex != 2) return;
+        var row = _buttons.Rows[e.RowIndex];
+        if (row.Cells[2].Value as string != ShortcutActions.RecordCustom) return;
+        string previous = _editPrevious is null or ShortcutActions.RecordCustom ? "native" : _editPrevious;
+        // Leave the grid's edit cycle before replacing the cell or opening a dialog.
+        BeginInvoke(() =>
+        {
+            _buttons.EndEdit();
+            _buttons.CurrentCell = null;
+            using var dialog = new ShortcutCaptureForm(previous);
+            string result = dialog.ShowDialog(this) == DialogResult.OK && dialog.Result is not null
+                ? dialog.Result : previous;
+            SetShortcutCell(row, result);
+            if (result != previous) Line($"Özel kısayol: {row.Cells[1].Value} → {ShortcutActions.Describe(result)}");
+        });
     }
 
     // Show every assignment row without scrolling; the log takes what is left.
@@ -509,6 +566,7 @@ internal sealed class MainForm : Form
                             continue;
                         }
                         session.ButtonPressed += cid => OnHidButton(session, cid);
+                        session.ThumbRotated += (rotation, status) => OnThumb(session, rotation, status);
                         _sessions.Add(session);
                         retained = true;
                         Line($"Bulundu: {session.Model.DisplayName} · {session.Name} · " +
@@ -549,7 +607,40 @@ internal sealed class MainForm : Form
             try { ShortcutActions.Execute(action); }
             catch (Exception ex) { Line($"Kısayol gönderilemedi: {ex.Message}"); }
         });
-        Line($"HID++ tuş {id} → {action}");
+        Line($"HID++ tuş {id} → {ShortcutActions.Describe(action)}");
+    }
+
+    private int _thumbAccum;
+    private bool _thumbFired;
+    private long _thumbLast;
+
+    // Runs on the HID read thread. Rotation is accumulated into steps; desktop
+    // switching fires once per gesture so a flick never skips several desktops.
+    private void OnThumb(MxMasterSession session, short rotation, byte status)
+    {
+        if (!_active || session != _current) return;
+        string action = _profile.Get(ThumbActions.Key);
+        if (!ThumbActions.NeedsDivert(action)) return;
+        long now = Environment.TickCount64;
+        // A pause also ends the gesture, in case the stop event was missed.
+        if (status == 1 || now - _thumbLast > 400) { _thumbAccum = 0; _thumbFired = false; }
+        _thumbLast = now;
+        _thumbAccum += rotation;
+        int res = session.ThumbwheelDivertedResolution;
+        int step = res > 0 ? Math.Max(1, res / 8) : 15;
+        while (Math.Abs(_thumbAccum) >= step && !(_thumbFired && ThumbActions.OncePerGesture(action)))
+        {
+            bool forward = _thumbAccum > 0;
+            _thumbAccum -= forward ? step : -step;
+            _thumbFired = true;
+            var keys = ThumbActions.Keys(action, forward);
+            _ = Task.Run(() =>
+            {
+                try { ShortcutActions.Send(keys); }
+                catch (Exception ex) { Line($"Tekerlek kısayolu gönderilemedi: {ex.Message}"); }
+            });
+        }
+        if (status == 3) { _thumbAccum = 0; _thumbFired = false; }
     }
 
     private async Task ApplyAsync()
@@ -579,6 +670,25 @@ internal sealed class MainForm : Form
                 }
                 originals[c.Key] = false;
             }
+            string thumb = _profile.Get(ThumbActions.Key);
+            bool thumbChange = false, thumbInverted = false;
+            if (_current.ThumbwheelFeature != 0 && thumb != "native")
+            {
+                var (diverted, inverted) = await _current.GetThumbwheelStatusAsync();
+                thumbInverted = inverted;
+                if (diverted && ThumbActions.NeedsDivert(thumb))
+                {
+                    if (!_reuseDiverted.Checked)
+                        throw new InvalidOperationException("Başparmak tekerleği önceden yönlendirilmiş. Çakışan bir uygulama çalışıyor olabilir.");
+                    Line("Başparmak tekerleğinin mevcut yönlendirmesi dinleniyor.");
+                }
+                else
+                {
+                    originals["THUMB:DIVERT"] = diverted;
+                    originals["THUMB:INVERT"] = inverted;
+                    thumbChange = true;
+                }
+            }
             if (originals.Count > 0)
             {
                 // Recovery journal must exist BEFORE touching the physical mouse.
@@ -590,7 +700,15 @@ internal sealed class MainForm : Form
                 foreach (var c in desired.Where(c => !reused.Contains(c.Cid)))
                 {
                     await _current.SetTemporaryDivertAsync(c.Cid, true);
-                    Line($"Yönlendirildi: {c.Description} · 0x{c.Cid:X4} → {_profile.Get(c.Key)}");
+                    Line($"Yönlendirildi: {c.Description} · 0x{c.Cid:X4} → {ShortcutActions.Describe(_profile.Get(c.Key))}");
+                }
+                if (thumbChange)
+                {
+                    bool divert = ThumbActions.NeedsDivert(thumb);
+                    // "Ters yön" flips the device's own setting and keeps native scrolling.
+                    bool invert = thumb == "hscroll-invert" ? !thumbInverted : thumbInverted;
+                    await _current.SetThumbwheelReportingAsync(divert, invert);
+                    Line($"Başparmak tekerleği → {ThumbActions.All.First(a => a.Id == thumb).Title}");
                 }
             }
             if (_global.Checked && new[] { "SYS:BACK", "SYS:FORWARD", "SYS:MIDDLE" }
@@ -639,6 +757,16 @@ internal sealed class MainForm : Form
                 Line($"Eski durum geri alındı: {item.Key}");
             }
             catch (Exception ex) { errors.Add($"{item.Key}: {ex.Message}"); }
+        }
+        if (journal.OriginalTemporaryDiversions.TryGetValue("THUMB:DIVERT", out bool thumbDiverted))
+        {
+            journal.OriginalTemporaryDiversions.TryGetValue("THUMB:INVERT", out bool thumbInverted);
+            try
+            {
+                await _current.SetThumbwheelReportingAsync(thumbDiverted, thumbInverted);
+                Line("Eski durum geri alındı: başparmak tekerleği");
+            }
+            catch (Exception ex) { errors.Add($"THUMB: {ex.Message}"); }
         }
         if (errors.Count > 0) throw new IOException("Bazı tuşlar geri alınamadı: " + string.Join("; ", errors));
         _store.ClearJournal();
