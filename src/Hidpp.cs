@@ -49,10 +49,12 @@ internal sealed class HidppConnection : IAsyncDisposable
     public string? LastError { get; private set; }
     public bool IsBroken => _broken;
     private volatile bool _broken;
+    private bool _useControlPath;
 
     public HidppConnection(HidInterface device)
     {
         _device = device;
+        _useControlPath = device.TransportName == "Bluetooth";
         var handle = HidNative.OpenReadWrite(device.DevicePath);
         _stream = new FileStream(handle, FileAccess.ReadWrite, Math.Max(device.InputLength, device.OutputLength), true);
         _readLoop = Task.Run(ReadLoopAsync);
@@ -130,31 +132,17 @@ internal sealed class HidppConnection : IAsyncDisposable
             }
             try
             {
-                try
-                {
-                    if (_device.TransportName == "Bluetooth")
-                    {
-                        // BLE HID WriteFile can stall; send an acknowledged
-                        // output report through the HID control path first.
-                        bool sent = await Task.Run(() => HidNative.SendOutputReport(_stream.SafeFileHandle, outgoing))
-                            .WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-                        if (!sent)
-                            await _stream.WriteAsync(outgoing, _cts.Token).AsTask()
-                                .WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-                    }
-                    else
-                    {
-                        await _stream.WriteAsync(outgoing, _cts.Token).AsTask()
-                            .WaitAsync(TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-                    }
-                }
-                catch (TimeoutException)
+                bool written;
+                try { written = await WriteReportAsync(outgoing).ConfigureAwait(false); }
+                catch (TimeoutException) { written = false; }
+                if (!written)
                 {
                     // A stalled HID write must not hold the scan indefinitely.
                     _broken = true;
                     _cts.Cancel();
                     _stream.Dispose();
-                    LastError = $"HID++ yazma zaman aşımı (slot {deviceIndex:X2}, feature {featureIndex:X2})";
+                    LastError = $"HID++ yazma zaman aşımı (slot {deviceIndex:X2}, feature {featureIndex:X2}). " +
+                        "Logi Options+ / Logitech arka plan servisleri alıcıyı tutuyor olabilir; kapatıp tekrar tarayın.";
                     throw new TimeoutException(LastError);
                 }
                 var completed = await Task.WhenAny(waiter.Task, Task.Delay(700, _cts.Token)).ConfigureAwait(false);
@@ -174,6 +162,37 @@ internal sealed class HidppConnection : IAsyncDisposable
             }
         }
         finally { _requests.Release(); }
+    }
+
+    // BLE HID always prefers the acknowledged control path. USB starts with the
+    // interrupt WriteFile path and switches to the control path if it stalls.
+    private async Task<bool> WriteReportAsync(byte[] outgoing)
+    {
+        var limit = TimeSpan.FromSeconds(2);
+        if (_useControlPath)
+        {
+            if (await Task.Run(() => HidNative.SendOutputReport(_stream.SafeFileHandle, outgoing))
+                    .WaitAsync(limit).ConfigureAwait(false))
+                return true;
+        }
+        // Cancel only the write on timeout (CancelIoEx) so the shared stream and
+        // read loop stay usable for the control-path fallback.
+        using (var writeCts = CancellationTokenSource.CreateLinkedTokenSource(_cts.Token))
+        {
+            writeCts.CancelAfter(limit);
+            try
+            {
+                await _stream.WriteAsync(outgoing, writeCts.Token).ConfigureAwait(false);
+                return true;
+            }
+            catch (OperationCanceledException) when (!_cts.IsCancellationRequested) { }
+            catch (IOException) { }
+        }
+        if (_useControlPath) return false;
+        bool sent = await Task.Run(() => HidNative.SendOutputReport(_stream.SafeFileHandle, outgoing))
+            .WaitAsync(limit).ConfigureAwait(false);
+        if (sent) _useControlPath = true;
+        return sent;
     }
 
     public async Task<byte> FeatureIndexAsync(byte slot, ushort featureId)

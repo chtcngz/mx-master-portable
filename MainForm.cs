@@ -29,15 +29,31 @@ internal sealed class MainForm : Form
     private readonly ToolStripMenuItem _trayStop = new("Atamaları durdur");
     private Icon? _brandIcon;
 
+    private bool _restoring;
+    private readonly EventWaitHandle _showSignal = new(false, EventResetMode.AutoReset, Program.ShowEventName);
+    private RegisteredWaitHandle? _showWait;
+
     [DllImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool DestroyIcon(IntPtr icon);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr window, int command);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr window);
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    private const int SwRestore = 9;
 
     private readonly ComboBox _devices = new() { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
     private readonly Button _scan = new() { Text = "Cihazları tara", AutoSize = true };
     private readonly Button _apply = new() { Text = "Atamaları uygula", AutoSize = true };
-    private readonly Button _stop = new() { Text = "Durdur / geri al", AutoSize = true };
-    private readonly Button _recover = new() { Text = "Önceki ayarı kurtar", AutoSize = true };
+    private readonly Button _stop = new() { Text = "Atamaları durdur", AutoSize = true };
+    private readonly Button _reset = new() { Text = "Varsayılana sıfırla", AutoSize = true };
+    private readonly Button _recover = new() { Text = "Önceki ayarı kurtar", AutoSize = true, Visible = false };
+    private readonly ToolTip _tips = new();
     private readonly CheckBox _global = new()
     {
         Text = "Windows geri/ileri/orta tuşlarını bütün farelerde yakala (isteğe bağlı, cihaz bazlı değil)",
@@ -95,7 +111,7 @@ internal sealed class MainForm : Form
 
         var buttonsLine = new FlowLayoutPanel { Dock = DockStyle.Fill, AutoSize = false,
             WrapContents = false, BackColor = Surface, Padding = new Padding(12, 8, 8, 5) };
-        buttonsLine.Controls.AddRange([_scan, _apply, _stop, _recover, _state]);
+        buttonsLine.Controls.AddRange([_scan, _apply, _stop, _reset, _recover, _state]);
         _state.Margin = new Padding(10, 7, 0, 0);
         var deviceLine = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2,
             BackColor = Surface, Padding = new Padding(14, 5, 14, 5) };
@@ -162,7 +178,11 @@ internal sealed class MainForm : Form
         _scan.Click += async (_, _) => await ScanAsync();
         _apply.Click += async (_, _) => await ApplyAsync();
         _stop.Click += async (_, _) => await StopAsync();
+        _reset.Click += (_, _) => ResetToDefaults();
         _recover.Click += async (_, _) => await RestoreJournalAsync();
+        _tips.SetToolTip(_stop, "Mouse'taki yönlendirmeleri kaldırır; seçimleriniz profilde saklı kalır.");
+        _tips.SetToolTip(_reset, "Bu mouse için bütün atamaları 'Varsayılan (fare işlevi)' yapar.");
+        _tips.SetToolTip(_recover, "Program önceki çalışmada kapanmadan çöktüyse mouse'ta kalan yönlendirmeleri kaldırır.");
         _devices.SelectedIndexChanged += (_, _) =>
         {
             if (_busy) return;
@@ -175,7 +195,13 @@ internal sealed class MainForm : Form
             UpdateButtons();
         };
         FormClosing += OnFormClosing;
-        Resize += (_, _) => { if (WindowState == FormWindowState.Minimized) HideToTray(); };
+        Resize += (_, _) => { if (!_restoring && WindowState == FormWindowState.Minimized) HideToTray(); };
+        // A second launch signals this event instead of starting another copy.
+        _showWait = ThreadPool.RegisterWaitForSingleObject(_showSignal, (_, _) =>
+        {
+            if (IsDisposed || !IsHandleCreated) return;
+            try { BeginInvoke((Action)ShowFromTray); } catch { }
+        }, null, Timeout.Infinite, false);
         PopulateControls();
         UpdateButtons();
         Line($"Ayarlar dizini: {_store.Folder}");
@@ -228,7 +254,7 @@ internal sealed class MainForm : Form
         _log.BorderStyle = BorderStyle.None;
         _log.BackColor = Surface;
         _log.ForeColor = Muted;
-        foreach (var button in new[] { _scan, _apply, _stop, _recover })
+        foreach (var button in new[] { _scan, _apply, _stop, _reset, _recover })
         {
             button.FlatStyle = FlatStyle.Flat;
             button.FlatAppearance.BorderSize = 0;
@@ -298,9 +324,21 @@ internal sealed class MainForm : Form
 
     private void ShowFromTray()
     {
-        WindowState = FormWindowState.Normal;
-        Show();
-        Activate();
+        if (_closing || IsDisposed) return;
+        // The window was hidden while minimized. Showing it first fires a Resize
+        // that still reports Minimized and would hide it again, so suppress the
+        // minimize-to-tray handler until the window is really restored.
+        _restoring = true;
+        try
+        {
+            Show();
+            if (IsIconic(Handle)) ShowWindow(Handle, SwRestore);
+            WindowState = FormWindowState.Normal;
+            BringToFront();
+            Activate();
+            SetForegroundWindow(Handle);
+        }
+        finally { _restoring = false; }
     }
 
     private void ExitFromTray()
@@ -351,7 +389,10 @@ internal sealed class MainForm : Form
         _scan.Enabled = !_busy && !_active;
         _apply.Enabled = !_busy && !_active && _current is not null && _store.LoadJournal() is null;
         _stop.Enabled = !_busy && _active;
+        _reset.Enabled = !_busy && !_active && _buttons.Rows.Count > 0;
         var journal = _store.LoadJournal();
+        // Recovery is only meaningful after a crash left recovery.json behind.
+        _recover.Visible = journal is not null;
         _recover.Enabled = !_busy && !_active && _current is not null &&
                            MatchesRecoveryJournal(journal, _current);
         _devices.Enabled = !_busy && !_active;
@@ -422,6 +463,17 @@ internal sealed class MainForm : Form
         _profile.AllowGlobalMouseHook = _global.Checked;
         if (_current is not null)
             _store.SaveProfile(_current.UnitId, _profile);
+    }
+
+    private void ResetToDefaults()
+    {
+        if (_busy || _active) return;
+        _buttons.EndEdit();
+        foreach (DataGridViewRow row in _buttons.Rows)
+            if (row.Tag is string && !row.Cells[2].ReadOnly) row.Cells[2].Value = "native";
+        _profile.Actions.Clear();
+        if (_current is not null) SaveScreenSettings();
+        Line("Bütün atamalar varsayılana döndürüldü.");
     }
 
     private async Task ScanAsync()
@@ -606,7 +658,12 @@ internal sealed class MainForm : Form
     {
         if (_busy) return;
         SetBusy(true, "Geri alınıyor…");
-        try { await RestoreCoreAsync(); }
+        try
+        {
+            await RestoreCoreAsync();
+            Line("Atamalar durduruldu; mouse kendi işlevlerine döndü. Seçimler profilde saklı, " +
+                 "temizlemek için 'Varsayılana sıfırla'.");
+        }
         catch (Exception ex) { Line($"GERİ ALMA HATASI: {ex.Message}"); }
         finally { SetBusy(false); }
     }
@@ -634,6 +691,8 @@ internal sealed class MainForm : Form
             _sessions.Clear();
         }
         catch (Exception ex) { Line($"Kapatma uyarısı: {ex.Message}"); }
+        _showWait?.Unregister(null);
+        _showSignal.Dispose();
         _tray.Visible = false;
         _tray.Dispose();
         _trayMenu.Dispose();
